@@ -19,7 +19,7 @@ import os
 import json
 from typing import Optional, Dict, Any, Generator
 
-from .Tool.OPEN_AI import OPEN_AI
+from .client.OPEN_AI import OPEN_AI
 from .Model import DeepSeek
 from .Model import Doubao
 from .Model import Kimi

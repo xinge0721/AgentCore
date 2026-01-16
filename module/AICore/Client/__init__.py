@@ -4,13 +4,10 @@
 """
 
 # 导入 OPEN_AI 客户端
-from .ConfigValidator import ConfigValidator
-from .HistoryManager import HistoryManager
-
+from .OPEN_AI import OPEN_AI
 # 导出所有可用的类
 __all__ = [
-    'ConfigValidator',
-    'HistoryManager',
+    'OPEN_AI',
 ]
 
 # 版本信息
