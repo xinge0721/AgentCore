@@ -24,7 +24,7 @@ from .Model import DeepSeek
 from .Model import Doubao
 from .Model import Kimi
 from .Model import Qwen
-from tools import logger
+from PublicTools import logger
 class AIFactory:
     """
     AI工厂类 - 管理单AI实例

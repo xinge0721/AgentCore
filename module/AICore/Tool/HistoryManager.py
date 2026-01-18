@@ -1,7 +1,7 @@
 import os
 import json
 from typing import Callable
-from tools import logger
+from PublicTools import logger
 
 # assistant.json 的 token 数最大限制倍数
 _assistant_Maximum_token_multiplier = 0.8
