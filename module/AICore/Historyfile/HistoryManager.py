@@ -175,6 +175,10 @@ class HistHistoryManager:
     async def _sanitize_message(self, message: str) -> str:
         """SQL注入防护（预留接口）"""
         pass
+    
+    
+    def clear(slef):
+        pass
 # ==================== 测试代码 ====================
 if __name__ == "__main__":
     import asyncio

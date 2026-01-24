@@ -1,92 +1,40 @@
+# -*- coding: utf-8 -*-
 from openai import OpenAI
-from typing import Callable
-import json
 import os
 from ..Historyfile.HistoryManager import HistoryManager
+from ..Model.base_model import BaseModel
+
 
 # OPEN_AI 类
 class OPEN_AI:
     """
     OPEN_AI API封装类
+
+    通过接收BaseModel子类实例来获取模型特定的参数和方法
     """
     def __init__(
             self,
-            request_params: dict,
-            max_tokens: int,
-            get_params_callback: Callable[[list], dict],  # 接受list(对话历史)，返回dict(请求参数)   - 非流式参数生成回调函数
-            get_params_callback_stream: Callable[[list], dict],  # 接受list(对话历史)，返回dict(请求参数)   - 流式参数生成回调函数
-            token_callback: Callable[[str], int],        # 接受str(内容)，返回int(token数)
-            is_stream_end_callback: Callable[[dict], bool] = None,  # 接受dict(chunk)，返回bool(是否结束) - 判断流式是否结束
-            extract_stream_callback: Callable[[dict], dict] = None,   # 接受dict(chunk)，返回dict({"类型": 数据}) - 提取流式内容
-            validate_file_callback: Callable[[str, str], tuple] = None,  # 接受str(file_path), str(purpose)，返回tuple(bool, str) - 验证文件是否合法
-            get_upload_params_callback: Callable[[str], dict] = None,  # 接受str(purpose)，返回dict(上传参数) - 生成上传参数
+            model: BaseModel,  # BaseModel子类实例，提供所有模型特定的方法
             role_path: str = None  # role目录路径（必需），指向包含assistant.json的role目录，用于区分不同模型
         ):
         # 数据验证
-        if not isinstance(request_params, dict):
-            raise ValueError("request_params 必须是字典类型")
-        if not isinstance(max_tokens, int) or max_tokens <= 0:
-            raise ValueError("max_tokens 必须是正整数")
-        if not callable(get_params_callback):
-            raise ValueError("get_params_callback 必须是可调用对象")
-        if not callable(get_params_callback_stream):
-            raise ValueError("get_params_callback_stream 必须是可调用对象")
-        if not callable(token_callback):
-            raise ValueError("token_callback 必须是可调用对象")
-        
-        # 运行时验证 token_callback
-        try:
-            test_token_result = token_callback("test")
-            if not isinstance(test_token_result, int):
-                raise ValueError(f"token_callback 必须返回 int 类型，但返回了 {type(test_token_result).__name__}")
-            if test_token_result < 0:
-                raise ValueError("token_callback 返回值不能为负数")
-        except TypeError as e:
-            raise ValueError(f"token_callback 签名错误，应接受一个 str 参数: {e}")
-        
-        # 运行时验证 get_params_callback
-        try:
-            test_params_result = get_params_callback("test")
-            if not isinstance(test_params_result, dict):
-                raise ValueError(f"get_params_callback 必须返回 dict 类型，但返回了 {type(test_params_result).__name__}")
-        except TypeError as e:
-            raise ValueError(f"get_params_callback 签名错误，应接受一个 str 参数: {e}")
-        
-        # 运行时验证 get_params_callback_stream
-        try:
-            test_params_stream_result = get_params_callback_stream("test")
-            if not isinstance(test_params_stream_result, dict):
-                raise ValueError(f"get_params_callback_stream 必须返回 dict 类型，但返回了 {type(test_params_stream_result).__name__}")
-        except TypeError as e:
-            raise ValueError(f"get_params_callback_stream 签名错误，应接受一个 str 参数: {e}")
+        if not isinstance(model, BaseModel):
+            raise ValueError("model 必须是 BaseModel 的子类实例")
 
-        self._request_params = request_params # 生成链接参数
+        # 保存模型实例
+        self._model = model
 
-        self._max_tokens = max_tokens         # 保存最大token数
+        # 创建客户端（使用模型的gen_params方法获取连接参数）
+        self._client = OpenAI(**self._model.gen_params())
 
-        self._get_params_callback = get_params_callback # 获取请求参数的回调函数（非流式）
-        
-        self._get_params_callback_stream = get_params_callback_stream # 获取请求参数的回调函数（流式）
-
-        self._token_callback = token_callback # 计算token的回调函数（因为一家一种token的计算方式，没法统一封装，所以需要一个回调函数）
-        
-        self._is_stream_end_callback = is_stream_end_callback # 判断流式是否结束的回调函数
-        
-        self._extract_stream_callback = extract_stream_callback # 提取流式内容的回调函数
-        
-        self._validate_file_callback = validate_file_callback # 验证文件是否合法的回调函数
-        
-        self._get_upload_params_callback = get_upload_params_callback # 生成上传参数的回调函数
-
-        self._client = OpenAI(**self._request_params) # 创建客户端
-
+        # 创建历史记录管理器
         self._history = HistoryManager(
-            token_callback=self._token_callback, 
+            token_callback=self._model.token_callback,  # 使用模型的token_callback方法
             role_path=role_path,
-            max_tokens=self._max_tokens
-        ) # 创建历史记录，token_callback为计算token的回调函数
+            max_tokens=self._model.max_tokens  # 使用模型的max_tokens属性
+        )
 
-        self._history.clear() #初始化的时候，清空历史，防止上一轮的数据，干扰到这一轮
+        self._history.clear()  # 初始化的时候，清空历史，防止上一轮的数据干扰到这一轮
 
     #  ================ 上传文件 ================
     def upload_file(self, file_path: str, purpose: str = "assistants"):
@@ -140,45 +88,45 @@ class OPEN_AI:
         if file_size == 0:
             raise ValueError("文件为空，无法上传")
         
-        # ========== 模型特定验证（可选） ==========
-        if self._validate_file_callback is not None:
+        # ========== 模型特定验证 ==========
+        # 调用模型的validate_file方法进行验证
+        if hasattr(self._model, 'validate_file'):
             try:
-                # 调用回调函数进行模型特定验证
-                is_valid, error_message = self._validate_file_callback(file_path, purpose)
-                
+                is_valid, error_message = self._model.validate_file(file_path, purpose)
+
                 # 验证返回值类型
                 if not isinstance(is_valid, bool):
-                    raise ValueError(f"validate_file_callback 必须返回 tuple(bool, str)，但 bool 部分返回了 {type(is_valid).__name__}")
+                    raise ValueError(f"validate_file 必须返回 tuple(bool, str)，但 bool 部分返回了 {type(is_valid).__name__}")
                 if not isinstance(error_message, str):
-                    raise ValueError(f"validate_file_callback 必须返回 tuple(bool, str)，但 str 部分返回了 {type(error_message).__name__}")
-                
+                    raise ValueError(f"validate_file 必须返回 tuple(bool, str)，但 str 部分返回了 {type(error_message).__name__}")
+
                 # 如果验证失败，抛出异常
                 if not is_valid:
                     raise ValueError(f"文件验证失败: {error_message}")
-                    
+
             except ValueError:
                 # 重新抛出验证失败的异常
                 raise
             except TypeError as e:
-                raise ValueError(f"validate_file_callback 调用失败，签名错误: {e}")
+                raise ValueError(f"validate_file 调用失败，签名错误: {e}")
             except Exception as e:
-                raise RuntimeError(f"调用 validate_file_callback 时发生错误: {e}")
-        
-        # ========== 获取上传参数（可选） ==========
+                raise RuntimeError(f"调用 validate_file 时发生错误: {e}")
+
+        # ========== 获取上传参数 ==========
         upload_params = {}
-        if self._get_upload_params_callback is not None:
+        if hasattr(self._model, 'get_upload_params'):
             try:
-                # 调用回调函数获取上传参数
-                upload_params = self._get_upload_params_callback(purpose)
-                
+                # 调用模型的get_upload_params方法获取上传参数
+                upload_params = self._model.get_upload_params(purpose)
+
                 # 验证返回值类型
                 if not isinstance(upload_params, dict):
-                    raise ValueError(f"get_upload_params_callback 必须返回 dict 类型，但返回了 {type(upload_params).__name__}")
-                    
+                    raise ValueError(f"get_upload_params 必须返回 dict 类型，但返回了 {type(upload_params).__name__}")
+
             except TypeError as e:
-                raise ValueError(f"get_upload_params_callback 调用失败，签名错误: {e}")
+                raise ValueError(f"get_upload_params 调用失败，签名错误: {e}")
             except Exception as e:
-                raise RuntimeError(f"调用 get_upload_params_callback 时发生错误: {e}")
+                raise RuntimeError(f"调用 get_upload_params 时发生错误: {e}")
         
         # ========== 执行上传 ==========
         try:
@@ -246,9 +194,9 @@ class OPEN_AI:
         # 获取请求参数
         try:
             messages = self._history.get()
-            request_params = self._get_params_callback(messages)
+            request_params = self._model.gen_request(messages)
             if not isinstance(request_params, dict):
-                raise ValueError("get_params_callback 返回值必须是字典类型")
+                raise ValueError("gen_request 返回值必须是字典类型")
         except Exception as e:
             raise RuntimeError(f"获取请求参数时发生错误: {e}")
         
@@ -302,18 +250,10 @@ class OPEN_AI:
         返回:
             生成器（Generator），每次 yield 返回一个 content 片段（字符串） 和 类型（content或tool_calls）
 
-        注意:
-            - 需要在初始化时提供 extract_stream_callback 来提取流式内容
-            - 可选提供 is_stream_end_callback 来判断流式是否结束
-
         示例用法:
             for chunk in client.send_stream("你好"):
                 print(chunk, end="", flush=True)
         """
-        # 检查是否提供了必要的流式回调
-        if self._extract_stream_callback is None:
-            raise RuntimeError("使用流式输出必须提供 extract_stream_callback 回调函数")
-
         # 验证输入
         if not isinstance(problem, str):
             raise TypeError("problem 必须是字符串类型")
@@ -337,12 +277,12 @@ class OPEN_AI:
             # 如果保存失败，记录警告但继续执行
             print(f"警告：保存消息到历史记录失败: {e}")
         
-        # 获取请求参数（使用流式回调）
+        # 获取请求参数（使用模型的流式参数生成方法）
         try:
             messages = self._history.get()
-            request_params = self._get_params_callback_stream(messages)
+            request_params = self._model.gen_params_stream(messages)
             if not isinstance(request_params, dict):
-                raise ValueError("get_params_callback_stream 返回值必须是字典类型")
+                raise ValueError("gen_params_stream 返回值必须是字典类型")
         except Exception as e:
             raise RuntimeError(f"获取流式请求参数时发生错误: {e}")
         
@@ -364,17 +304,16 @@ class OPEN_AI:
                     # 如果转换失败，跳过这个chunk
                     continue
 
-                # 使用回调判断是否结束（如果提供了回调）
-                if self._is_stream_end_callback is not None:
-                    try:
-                        if self._is_stream_end_callback(chunk_dict):
-                            break
-                    except Exception as e:
-                        print(f"警告：判断流式结束时发生错误: {e}")
-
-                # 使用回调提取内容
+                # 使用模型方法判断是否结束
                 try:
-                    result_dict = self._extract_stream_callback(chunk_dict)
+                    if self._model.is_stream_end(chunk_dict):
+                        break
+                except Exception as e:
+                    print(f"警告：判断流式结束时发生错误: {e}")
+
+                # 使用模型方法提取内容
+                try:
+                    result_dict = self._model.extract_stream_info(chunk_dict)
 
                     # 如果返回的不是字典，跳过
                     if not isinstance(result_dict, dict):
