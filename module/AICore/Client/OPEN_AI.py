@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 from openai import OpenAI
 import os
-from ..Historyfile.HistoryManager import HistoryManager
+from ..Historyfile.HistoryManager import HistHistoryManager
 from ..Model.base_model import BaseModel
+from PublicTools.log import logger
 
 
 # OPEN_AI 类
@@ -15,26 +16,35 @@ class OPEN_AI:
     def __init__(
             self,
             model: BaseModel,  # BaseModel子类实例，提供所有模型特定的方法
-            role_path: str = None  # role目录路径（必需），指向包含assistant.json的role目录，用于区分不同模型
+            system_prompt: str,  # 系统提示词
+            user_name: str = None,  # 预留：用户名（用户历史管理）
+            user_level: int = 0  # 预留：用户等级（VIP/MCP服务/工具权限）
         ):
         # 数据验证
         if not isinstance(model, BaseModel):
             raise ValueError("model 必须是 BaseModel 的子类实例")
+        if not isinstance(system_prompt, str):
+            raise TypeError("system_prompt 必须是字符串类型")
+        if not system_prompt.strip():
+            raise ValueError("system_prompt 不能为空")
 
         # 保存模型实例
         self._model = model
+
+        # 保存预留参数
+        self._user_name = user_name
+        self._user_level = user_level
 
         # 创建客户端（使用模型的gen_params方法获取连接参数）
         self._client = OpenAI(**self._model.gen_params())
 
         # 创建历史记录管理器
-        self._history = HistoryManager(
-            token_callback=self._model.token_callback,  # 使用模型的token_callback方法
-            role_path=role_path,
-            max_tokens=self._model.max_tokens  # 使用模型的max_tokens属性
+        self._history = HistHistoryManager(
+            messages=[],
+            system_prompt=system_prompt,
+            token_callback=self._model.token_callback,
+            maxtoken=self._model.max_tokens
         )
-
-        self._history.clear()  # 初始化的时候，清空历史，防止上一轮的数据干扰到这一轮
 
     #  ================ 上传文件 ================
     def upload_file(self, file_path: str, purpose: str = "assistants"):
@@ -56,7 +66,7 @@ class OPEN_AI:
         
         注意:
             如果提供了 validate_file_callback，将使用模型特定的验证逻辑
-            如果提供了 get_upload_params_callback，将使用模b型特定的上传参数
+            如果提供了 get_upload_params_callback，将使用模型特定的上传参数
         """
         # ========== 基础验证（通用） ==========
         # 验证输入类型
@@ -153,22 +163,22 @@ class OPEN_AI:
         except Exception as e:
             raise RuntimeError(f"上传文件时发生错误: {e}")
 
-    #  ================ 发送请求 （非流式）================
-    def send(self, problem: str, role: str = "user"):
+    #  ================ 私有方法 ================
+    def _validate_message_params(self, problem: str, role: str) -> tuple:
         """
-        发送消息到 OpenAI API 并获取回答
+        验证消息参数
 
         参数:
-            problem: 消息内容（字符串）
-            role: 消息角色，可选值：
-                - "user": 用户消息（默认）
-                - "system": 系统消息（用于MCP工具结果回传等）
-                - "assistant": 助手消息（特殊场景）
+            problem: 消息内容
+            role: 消息角色
 
         返回:
-            API 的回答内容
+            tuple: (处理后的problem, 处理后的role)
+
+        异常:
+            TypeError: 参数类型错误
+            ValueError: 参数值无效
         """
-        # 验证输入
         if not isinstance(problem, str):
             raise TypeError("problem 必须是字符串类型")
         if not problem.strip():
@@ -179,64 +189,66 @@ class OPEN_AI:
         problem = problem.strip()
         role = role.strip()
 
-        # 验证角色有效性
         valid_roles = {"user", "system", "assistant"}
         if role not in valid_roles:
             raise ValueError(f"role 必须是 {valid_roles} 之一，当前值为: {role}")
 
-        # 先保存消息到历史（使用指定的角色）
+        return problem, role
+
+    def _process_stream_chunk(self, chunk) -> dict:
+        """
+        处理单个流式chunk
+
+        参数:
+            chunk: OpenAI返回的chunk对象
+
+        返回:
+            dict: 处理后的结果字典，如 {"content": "..."} 或 {"thinking": "..."} 或 {"None": None}
+        """
+        # 将chunk转换为dict
         try:
-            self._history.insert(role, problem)
-        except Exception as e:
-            # 如果保存失败，记录警告但继续执行
-            print(f"警告：保存消息到历史记录失败: {e}")
-        
-        # 获取请求参数
+            chunk_dict = chunk.model_dump() if hasattr(chunk, 'model_dump') else chunk.dict()
+        except:
+            return {"None": None}
+
+        # 使用模型方法判断是否结束
         try:
-            messages = self._history.get()
-            request_params = self._model.gen_request(messages)
-            if not isinstance(request_params, dict):
-                raise ValueError("gen_request 返回值必须是字典类型")
+            if self._model.is_stream_end(chunk_dict):
+                return {"end": True}
         except Exception as e:
-            raise RuntimeError(f"获取请求参数时发生错误: {e}")
-        
-        # 调用 chat.completions.create
+            logger.warning(f"判断流式结束时发生错误: {e}")
+
+        # 使用模型方法提取内容
         try:
-            completion = self._client.chat.completions.create(**request_params)
-            
-            # 检查返回值
-            if not completion or not hasattr(completion, 'choices'):
-                raise ValueError("API 返回了无效的响应")
-            
-            if not completion.choices or len(completion.choices) == 0:
-                raise ValueError("API 未返回任何回答选项")
-            
-            if not hasattr(completion.choices[0], 'message'):
-                raise ValueError("API 响应缺少 message 字段")
-            
-            response = completion.choices[0].message.content
-            
-            # 检查响应内容
-            if response is None:
-                raise ValueError("API 返回了空的 content")
-            
-            if not isinstance(response, str):
-                response = str(response)  # 尝试转换为字符串
-                
+            result_dict = self._model.extract_stream_info(chunk_dict)
+            if not isinstance(result_dict, dict):
+                return {"None": None}
+            return result_dict
         except Exception as e:
-            raise RuntimeError(f"调用 OpenAI API 时发生错误: {e}")
-        
-        # 保存 AI 的回答到历史
-        try:
-            self._history.insert("assistant", response)
-        except Exception as e:
-            # 记录错误但不影响返回（因为 API 调用成功了）
-            print(f"警告：保存 AI 回答到历史记录失败: {e}")
-        
-        return response
+            logger.warning(f"提取流式内容时发生错误: {e}")
+            return {"None": None}
+
+    async def _save_response_to_history(self, content: str, thinking: str):
+        """
+        保存响应到历史记录
+
+        参数:
+            content: 回复内容
+            thinking: 思考过程内容
+        """
+        if content:
+            try:
+                await self._history.write("assistant", content)
+            except Exception as e:
+                logger.warning(f"保存 AI 回答到历史记录失败: {e}")
+        elif thinking:
+            try:
+                await self._history.write("assistant", "[思考中]")
+            except Exception as e:
+                logger.warning(f"保存 AI 回答到历史记录失败: {e}")
 
     #  ================ 发送请求 （流式）================
-    def send_stream(self, problem: str, role: str = "user"):
+    async def send_stream(self, problem: str, role: str = "user"):
         """
         发送消息到 OpenAI API 并获取流式回答
 
@@ -254,38 +266,25 @@ class OPEN_AI:
             for chunk in client.send_stream("你好"):
                 print(chunk, end="", flush=True)
         """
-        # 验证输入
-        if not isinstance(problem, str):
-            raise TypeError("problem 必须是字符串类型")
-        if not problem.strip():
-            raise ValueError("problem 不能为空或空白字符串")
-        if not isinstance(role, str):
-            raise TypeError("role 必须是字符串类型")
-
-        problem = problem.strip()
-        role = role.strip()
-
-        # 验证角色有效性
-        valid_roles = {"user", "system", "assistant"}
-        if role not in valid_roles:
-            raise ValueError(f"role 必须是 {valid_roles} 之一，当前值为: {role}")
+        # 验证输入参数
+        problem, role = self._validate_message_params(problem, role)
 
         # 先保存消息到历史（使用指定的角色）
         try:
-            self._history.insert(role, problem)
+            await self._history.write(role, problem)
         except Exception as e:
             # 如果保存失败，记录警告但继续执行
-            print(f"警告：保存消息到历史记录失败: {e}")
-        
+            logger.warning(f"保存消息到历史记录失败: {e}")
+
         # 获取请求参数（使用模型的流式参数生成方法）
         try:
-            messages = self._history.get()
+            messages = self._history.read()
             request_params = self._model.gen_params_stream(messages)
             if not isinstance(request_params, dict):
                 raise ValueError("gen_params_stream 返回值必须是字典类型")
         except Exception as e:
             raise RuntimeError(f"获取流式请求参数时发生错误: {e}")
-        
+
         # 累积完整响应内容，用于最后保存到历史
         # 分离 content 和 thinking 的累积
         full_response = ""  # 普通回复内容
@@ -297,80 +296,122 @@ class OPEN_AI:
 
             # 遍历流式响应
             for chunk in stream:
-                # 将chunk转换为dict（OpenAI返回的是对象，需要转换为dict供回调使用）
-                try: # 将chunk转换为dict
-                    chunk_dict = chunk.model_dump() if hasattr(chunk, 'model_dump') else chunk.dict()
-                except:
-                    # 如果转换失败，跳过这个chunk
+                # 使用私有方法处理chunk
+                result_dict = self._process_stream_chunk(chunk)
+
+                # 检查是否结束
+                if result_dict.get("end"):
+                    break
+
+                # 提取类型和数据
+                data_type = list(result_dict.keys())[0] if result_dict else "None"
+                content = result_dict.get(data_type)
+
+                # 如果提取的内容为空或None，跳过
+                if content is None or content == "" or data_type == "None":
                     continue
 
-                # 使用模型方法判断是否结束
-                try:
-                    if self._model.is_stream_end(chunk_dict):
-                        break
-                except Exception as e:
-                    print(f"警告：判断流式结束时发生错误: {e}")
+                # 分别累积 content 和 thinking
+                if data_type == "content":
+                    if not isinstance(content, str):
+                        content = str(content)
+                    full_response += content
+                elif data_type == "thinking":
+                    if not isinstance(content, str):
+                        content = str(content)
+                    full_thinking += content
 
-                # 使用模型方法提取内容
-                try:
-                    result_dict = self._model.extract_stream_info(chunk_dict)
-
-                    # 如果返回的不是字典，跳过
-                    if not isinstance(result_dict, dict):
-                        continue
-
-                    # 提取类型和数据
-
-                    data_type = list(result_dict.keys())[0] if result_dict else "None"#提取类型
-                    content = result_dict.get(data_type)#提取数据
-
-                    # 如果提取的内容为空或None，跳过
-                    if content is None or content == "":
-                        continue
-
-                    # 如果类型是None，跳过
-                    if data_type == "None":
-                        continue
-
-                    # 分别累积 content 和 thinking
-                    if data_type == "content":
-                        if not isinstance(content, str):
-                            content = str(content)
-                        full_response += content
-                    elif data_type == "thinking":
-                        if not isinstance(content, str):
-                            content = str(content)
-                        full_thinking += content
-
-                    # yield 当前片段（字典格式）
-                    yield result_dict
-
-                except Exception as e:
-                    # 提取内容失败时记录警告并继续
-                    print(f"警告：提取流式内容时发生错误: {e}")
-                    continue
+                # yield 当前片段（字典格式）
+                yield result_dict
 
         except Exception as e:
             # 如果出现错误，尝试保存已经获取的部分响应
-            if full_response or full_thinking:
-                try:
-                    self._history.insert("assistant", full_response, reasoning_content=full_thinking if full_thinking else None)
-                except:
-                    pass
+            await self._save_response_to_history(full_response, full_thinking)
             raise RuntimeError(f"调用 OpenAI API 流式接口时发生错误: {e}")
 
-        # 保存完整的 AI 回答到历史（包括 reasoning_content）
-        # 注意：只有当 full_response 不为空时才保存（content 字段不能为空）
-        if full_response:
-            try:
-                self._history.insert("assistant", full_response, reasoning_content=full_thinking if full_thinking else None)
-            except Exception as e:
-                # 记录错误但不影响返回（因为 API 调用成功了）
-                print(f"警告：保存 AI 回答到历史记录失败: {e}")
-        elif full_thinking:
-            # 如果只有 thinking 没有 content，使用占位符
-            try:
-                self._history.insert("assistant", "[思考中]", reasoning_content=full_thinking)
-            except Exception as e:
-                print(f"警告：保存 AI 回答到历史记录失败: {e}")
+        # 保存完整的 AI 回答到历史
+        await self._save_response_to_history(full_response, full_thinking)
+
+    #  ================ 预留接口 ================
+    def _on_token_usage(self, tokens: int):
+        """
+        token使用监控接口（预留）
+        上层可通过继承重写此方法来管理用户token消耗
+        """
+        pass
+
+    #  ================ 参数管理接口 ================
+    def get_params(self) -> dict:
+        """
+        获取当前所有可配置参数
+
+        返回:
+            dict: 包含所有可配置参数的字典
+        """
+        return {
+            "temperature": self._model.temperature,
+            "top_p": self._model.top_p,
+            "max_tokens": self._model.max_tokens,
+            "frequency_penalty": self._model.frequency_penalty,
+            "presence_penalty": self._model.presence_penalty,
+            "stop": self._model.stop,
+            "response_format": self._model.response_format,
+            "tools": self._model.tools,
+            "tool_choice": self._model.tool_choice,
+            "logprobs": self._model.logprobs,
+        }
+
+    def set_params(self, params: dict):
+        """
+        批量设置参数
+
+        参数:
+            params: 参数字典，支持的键：
+                - temperature: 温度参数 (0-2)
+                - top_p: 核采样参数 (0-1)
+                - max_tokens: 最大token数
+                - frequency_penalty: 频率惩罚 (-2到2)
+                - presence_penalty: 存在惩罚 (-2到2)
+                - stop: 停止词
+                - response_format: 响应格式
+                - logprobs: 是否返回log概率
+
+        异常:
+            TypeError: params 不是字典类型
+            ValueError: 参数值无效
+        """
+        if not isinstance(params, dict):
+            raise TypeError("params 必须是字典类型")
+
+        # 参数名到 setter 方法的映射
+        setter_map = {
+            "temperature": self._model.set_temperature,
+            "top_p": self._model.set_top_p,
+            "max_tokens": self._model.set_max_tokens,
+            "frequency_penalty": self._model.set_frequency_penalty,
+            "presence_penalty": self._model.set_presence_penalty,
+            "stop": self._model.set_stop,
+            "response_format": self._model.set_response_format,
+            "logprobs": self._model.set_logprobs,
+        }
+
+        # 遍历参数并调用对应的 setter
+        for key, value in params.items():
+            if key in setter_map:
+                setter_map[key](value)
+            else:
+                logger.warning(f"未知参数: {key}，已忽略")
+
+    #  ================ 工具设置接口 ================
+    def set_tools(self, tools: list):
+        """
+        设置工具列表
+
+        参数:
+            tools: 工具列表
+
+        异常:
+            ValueError: tools 不是列表类型或超过128个
+        """
+        self._model.set_tools(tools)
 

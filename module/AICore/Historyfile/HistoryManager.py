@@ -11,7 +11,7 @@ class HistHistoryManager:
     用于管理AI对话的历史记录，包括消息存储、token计数和限制控制
     """
 
-    def __init__(self, messages: dict, system_prompt: str, token_callback: Callable[[str], int], maxtoken: int):
+    def __init__(self, messages: list, system_prompt: str, token_callback: Callable[[str], int], maxtoken: int):
         """
         初始化历史管理器
 
@@ -24,11 +24,11 @@ class HistHistoryManager:
 
         # ========== 参数校验 ==========
 
-        # 校验 messages：必须是非空的字典类型
+        # 校验 messages：必须是非空的列表类型
         if messages is None:
             raise ValueError("messages 不能为 None")
-        if not isinstance(messages, dict):
-            raise TypeError("messages 必须是字典类型")
+        if not isinstance(messages, list):
+            raise TypeError("messages 必须是列表类型")
 
         # 校验 system_prompt：必须是非空的字符串类型
         if system_prompt is None:
@@ -60,8 +60,8 @@ class HistHistoryManager:
 
         # ========== 初始化成员变量 ==========
 
-        # 消息字典：存储对话历史的基础模板
-        self.messages: dict = messages
+        # 消息列表：存储对话历史
+        self.messages: list = messages
 
         # 系统提示词：作为首个消息，不会被裁剪
         self.system_prompt: str = system_prompt
@@ -109,10 +109,6 @@ class HistHistoryManager:
         if not isinstance(message, str):
             raise TypeError("message 必须是字符串类型")
 
-        # ========== 安全防护 ==========
-        # SQL注入防护（预留接口）
-        # sanitized_message = await self._sanitize_message(message)
-
         # ========== token计算 ==========
         # 第一步：计算新消息token
         new_token = self.token_callback(message)
@@ -122,18 +118,18 @@ class HistHistoryManager:
         if self.total_tokens + new_token > self.maxtoken:
             # 第四步：超过则裁剪
             deficit = self.maxtoken - (self.total_tokens + new_token)
-            if not await self._trim(deficit):
+            if not await self.trim(deficit):
                 return False
 
         # ========== 写入 ==========
         # 第五步：累加token_counts和messages
         self.token_counts.append(new_token)
         self.total_tokens += new_token
-        self.messages["messages"].append({"role": role, "content": message})
+        self.messages.append({"role": role, "content": message})
 
         return True
 
-    async def _trim(self, deficit: int) -> bool:
+    async def trim(self, deficit: int) -> bool:
         """
         裁剪历史消息
         参数:
@@ -165,20 +161,21 @@ class HistHistoryManager:
         self.token_counts = [self.token_counts[0]] + self.token_counts[trim_index + 1:]
 
         # 裁剪messages（messages[i] 对应 token_counts[i+1]）
-        self.messages["messages"] = self.messages["messages"][trim_index:]
+        self.messages = self.messages[trim_index:]
 
         # 更新总token数
         self.total_tokens -= trimmed_tokens
 
         return True
-
-    async def _sanitize_message(self, message: str) -> str:
-        """SQL注入防护（预留接口）"""
-        pass
     
-    
-    def clear(slef):
-        pass
+    def clear(self):
+        """
+        清空历史消息，重置到初始状态
+        保留 system_prompt 的 token 计数
+        """
+        self.messages = []
+        self.token_counts = [self.token_counts[0]]
+        self.total_tokens = self.token_counts[0]
 # ==================== 测试代码 ====================
 if __name__ == "__main__":
     import asyncio
@@ -187,7 +184,7 @@ if __name__ == "__main__":
     def simple_token_counter(text: str) -> int:
         return len(text)
 
-    async def test_trim():
+    async def testtrim():
         print("=" * 50)
         print("测试裁剪逻辑")
         print("=" * 50)
@@ -195,7 +192,7 @@ if __name__ == "__main__":
         # 测试1：正常写入，不需要裁剪
         print("\n【测试1】正常写入，不需要裁剪")
         mgr = HistHistoryManager(
-            messages={"messages": []},
+            messages=[],
             system_prompt="sys",# 3tokens
             token_callback=simple_token_counter,
             maxtoken=100
@@ -211,7 +208,7 @@ if __name__ == "__main__":
         # 测试2：裁剪部分消息
         print("\n【测试2】裁剪部分消息")
         mgr = HistHistoryManager(
-            messages={"messages": []},
+            messages=[],
             system_prompt="sys",  # 3 tokens
             token_callback=simple_token_counter,
             maxtoken=20
@@ -232,7 +229,7 @@ if __name__ == "__main__":
         # 测试3：裁剪所有消息还不够（新消息太大）
         print("\n【测试3】裁剪所有消息还不够")
         mgr = HistHistoryManager(
-            messages={"messages": []},
+            messages=[],
             system_prompt="sys",  # 3 tokens
             token_callback=simple_token_counter,
             maxtoken=20
@@ -248,7 +245,7 @@ if __name__ == "__main__":
         # 测试4：没有可裁剪的消息
         print("\n【测试4】没有可裁剪的消息")
         mgr = HistHistoryManager(
-            messages={"messages": []},
+            messages=[],
             system_prompt="sys",  # 3 tokens
             token_callback=simple_token_counter,
             maxtoken=10
@@ -270,7 +267,7 @@ if __name__ == "__main__":
             return ''.join(random.choices(string.ascii_letters + string.digits, k=length))
 
         mgr = HistHistoryManager(
-            messages={"messages": []},
+            messages=[],
             system_prompt="s" * 1000,  # 1000 tokens 的系统提示
             token_callback=simple_token_counter,
             maxtoken=150000  # 150k tokens
@@ -284,7 +281,7 @@ if __name__ == "__main__":
             if result:
                 success_count += 1
             # 验证数据一致性
-            assert len(mgr.token_counts) == len(mgr.messages["messages"]) + 1
+            assert len(mgr.token_counts) == len(mgr.messages) + 1
             assert mgr.total_tokens == sum(mgr.token_counts)
             assert mgr.total_tokens <= mgr.maxtoken
         elapsed = time.time() - start_time
@@ -296,7 +293,7 @@ if __name__ == "__main__":
         # 测试6：边界测试 - 刚好等于maxtoken
         print("\n【测试6】边界测试 - 刚好等于maxtoken")
         mgr = HistHistoryManager(
-            messages={"messages": []},
+            messages=[],
             system_prompt="sys",  # 3 tokens
             token_callback=simple_token_counter,
             maxtoken=8
@@ -310,7 +307,7 @@ if __name__ == "__main__":
         # 测试7：连续裁剪多轮
         print("\n【测试7】连续裁剪多轮")
         mgr = HistHistoryManager(
-            messages={"messages": []},
+            messages=[],
             system_prompt="s",  # 1 token
             token_callback=simple_token_counter,
             maxtoken=10
@@ -327,7 +324,7 @@ if __name__ == "__main__":
         result = await mgr.write("user", "xyz")  # 3 tokens
         print(f"  写入3token消息结果: {result}, total: {mgr.total_tokens}")
         assert result == True
-        assert len(mgr.token_counts) == len(mgr.messages["messages"]) + 1
+        assert len(mgr.token_counts) == len(mgr.messages) + 1
 
         # 测试8：多实例并发压力测试 - 模拟多用户
         print("\n【测试8】多实例并发压力测试 - 纯CPU（无I/O）")
@@ -335,7 +332,7 @@ if __name__ == "__main__":
         async def user_session(user_id: int, write_count: int):
             """模拟单个用户会话（无I/O延迟）"""
             user_mgr = HistHistoryManager(
-                messages={"messages": []},
+                messages=[],
                 system_prompt="s" * 500,
                 token_callback=simple_token_counter,
                 maxtoken=100000
@@ -345,7 +342,7 @@ if __name__ == "__main__":
                 msg = random_message(50, 500)
                 if await user_mgr.write("user", msg):
                     success += 1
-            assert len(user_mgr.token_counts) == len(user_mgr.messages["messages"]) + 1
+            assert len(user_mgr.token_counts) == len(user_mgr.messages) + 1
             assert user_mgr.total_tokens == sum(user_mgr.token_counts)
             return user_id, success, user_mgr.total_tokens
 
@@ -368,7 +365,7 @@ if __name__ == "__main__":
         async def user_session_with_io(user_id: int, write_count: int, io_delay: float = 0.001):
             """模拟单个用户会话（带I/O延迟）"""
             user_mgr = HistHistoryManager(
-                messages={"messages": []},
+                messages=[],
                 system_prompt="s" * 500,
                 token_callback=simple_token_counter,
                 maxtoken=100000
@@ -379,7 +376,7 @@ if __name__ == "__main__":
                 await asyncio.sleep(io_delay)  # 模拟1ms的I/O延迟（如网络请求）
                 if await user_mgr.write("user", msg):
                     success += 1
-            assert len(user_mgr.token_counts) == len(user_mgr.messages["messages"]) + 1
+            assert len(user_mgr.token_counts) == len(user_mgr.messages) + 1
             assert user_mgr.total_tokens == sum(user_mgr.token_counts)
             return user_id, success, user_mgr.total_tokens
 
@@ -474,4 +471,4 @@ if __name__ == "__main__":
         print("所有测试通过!")
         print("=" * 50)
 
-    asyncio.run(test_trim())
+    asyncio.run(testtrim())
