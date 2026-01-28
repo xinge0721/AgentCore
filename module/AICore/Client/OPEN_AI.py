@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
-from openai import OpenAI
+# from openai import OpenAI
 import os
 from ..Historyfile.HistoryManager import HistHistoryManager
 from ..Model.base_model import BaseModel
-from PublicTools.log import logger
-
+from logger import logger
+from openai import OpenAI
 
 # OPEN_AI 类
 class OPEN_AI:
@@ -228,7 +228,7 @@ class OPEN_AI:
             logger.warning(f"提取流式内容时发生错误: {e}")
             return {"None": None}
 
-    async def _save_response_to_history(self, content: str, thinking: str):
+    async def _save_response_to_history(self, content: str, thinking: str = None):
         """
         保存响应到历史记录
 
@@ -236,16 +236,11 @@ class OPEN_AI:
             content: 回复内容
             thinking: 思考过程内容
         """
-        if content:
-            try:
-                await self._history.write("assistant", content)
-            except Exception as e:
-                logger.warning(f"保存 AI 回答到历史记录失败: {e}")
-        elif thinking:
-            try:
-                await self._history.write("assistant", "[思考中]")
-            except Exception as e:
-                logger.warning(f"保存 AI 回答到历史记录失败: {e}")
+        try:
+            await self._history.write("assistant", content,thinking)
+        except Exception as e:
+            logger.warning(f"保存 AI 回答到历史记录失败: {e}")
+
 
     #  ================ 发送请求 （流式）================
     async def send_stream(self, problem: str, role: str = "user"):
@@ -271,7 +266,11 @@ class OPEN_AI:
 
         # 先保存消息到历史（使用指定的角色）
         try:
-            await self._history.write(role, problem)
+            # 如果是工具结果且已有思考记录，插入空占位
+            if role == "system" and len(self._history.think_token_counts) > 0:
+                await self._history.write(role, problem, think_content="")
+            else:
+                await self._history.write(role, problem)
         except Exception as e:
             # 如果保存失败，记录警告但继续执行
             logger.warning(f"保存消息到历史记录失败: {e}")
@@ -289,6 +288,7 @@ class OPEN_AI:
         # 分离 content 和 thinking 的累积
         full_response = ""  # 普通回复内容
         full_thinking = ""  # 思考过程内容
+        full_tool_calls = []  # 工具调用累积
 
         try:
             # 调用 chat.completions.create 获取流式响应
@@ -320,6 +320,8 @@ class OPEN_AI:
                     if not isinstance(content, str):
                         content = str(content)
                     full_thinking += content
+                elif data_type == "tool_calls":
+                    full_tool_calls.extend(content)
 
                 # yield 当前片段（字典格式）
                 yield result_dict
@@ -329,8 +331,13 @@ class OPEN_AI:
             await self._save_response_to_history(full_response, full_thinking)
             raise RuntimeError(f"调用 OpenAI API 流式接口时发生错误: {e}")
 
-        # 保存完整的 AI 回答到历史
-        await self._save_response_to_history(full_response, full_thinking)
+        finally:
+            # 保存完整的 AI 回答到历史
+            await self._save_response_to_history(full_response, full_thinking)
+
+            # 如果没有工具调用，清除思考内容（释放token）
+            if not full_tool_calls:
+                self._history.clear_think()
 
     #  ================ 预留接口 ================
     def _on_token_usage(self, tokens: int):
@@ -414,4 +421,3 @@ class OPEN_AI:
             ValueError: tools 不是列表类型或超过128个
         """
         self._model.set_tools(tools)
-

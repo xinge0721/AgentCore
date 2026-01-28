@@ -64,7 +64,7 @@ class DeepSeek(BaseModel):
             "诗歌创作": 1.5,
         }
 
-        self.temperature = temperature_map.get(pattern, temperature)
+        self.temperature = temperature_map.get(pattern, temperature) if temperature == 0 else temperature
 
     # ================ 计算token的回调函数 ================
     def token_callback(self, content: str) -> int:

@@ -37,6 +37,7 @@ class BaseModel(ABC):
         self.tools = message.get("params").get("tools", None)  # Function Calling工具列表
         self.tool_choice = message.get("params").get("tool_choice", None)  # 工具选择策略
         self.logprobs = message.get("params").get("logprobs", False)  # 是否返回log概率
+        self.top_logprobs = message.get("params").get("top_logprobs", None)  # 返回概率最高的N个token
         
     def set_api_key(self, api_key: str):
         self.api_key = api_key
